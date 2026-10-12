@@ -3,8 +3,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src ./src
 RUN pip install --no-cache-dir .
-RUN useradd --create-home bot && mkdir -p /data/photos && chown -R bot:bot /data
+RUN useradd --create-home bot && chown bot:bot /app
 USER bot
-ENV DATABASE_URL=sqlite:////data/bot.sqlite3 PHOTO_DIR=/data/photos
 CMD ["tg-posting-bot"]
 

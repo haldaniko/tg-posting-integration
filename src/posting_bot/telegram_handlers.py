@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
-from uuid import uuid4
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
-from .workflow import BotService, View
+from .workflow import BotService, PhotoRef, View
 
 log = logging.getLogger(__name__)
 MENU = ReplyKeyboardMarkup([["Создать статью", "Черновики"], ["Отмена"]], resize_keyboard=True)
@@ -35,8 +33,12 @@ def private_user(update: Update, service: BotService) -> int | None:
     return user.id
 
 
-def register(app: Application, service: BotService, photo_dir: Path) -> None:
-    photo_dir.mkdir(parents=True, exist_ok=True)
+def register(app: Application, service: BotService) -> None:
+    async def load_photo(file_id: str) -> bytes:
+        tg_file = await app.bot.get_file(file_id)
+        return bytes(await tg_file.download_as_bytearray())
+
+    service.photo_loader = load_photo
 
     async def command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user_id = private_user(update, service)
@@ -101,24 +103,7 @@ def register(app: Application, service: BotService, photo_dir: Path) -> None:
         if size and size > MAX_PHOTO:
             await send(update, View("Фото должно быть не больше 10 МБ."))
             return
-        path = photo_dir / f"{uuid4().hex}{suffix}"
-        try:
-            tg_file = await context.bot.get_file(file_id)
-            await tg_file.download_to_drive(custom_path=path)
-            if path.stat().st_size > MAX_PHOTO:
-                raise ValueError("size")
-            signature = path.read_bytes()[:12]
-            valid = (suffix == ".jpg" and signature.startswith(b"\xff\xd8\xff")) or (suffix == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (suffix == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")
-            if not valid:
-                raise ValueError("format")
-            view = await service.input(user_id, path, update_id=update.update_id)
-        except ValueError:
-            path.unlink(missing_ok=True)
-            view = View("Неверный формат или размер фото. Отправьте JPG, PNG или WebP до 10 МБ.")
-        except Exception:
-            path.unlink(missing_ok=True)
-            log.warning("Telegram photo download failed for user=%s", user_id)
-            view = View("Не удалось скачать фото. Попробуйте ещё раз.")
+        view = await service.input(user_id, PhotoRef(file_id, suffix), update_id=update.update_id)
         await send(update, view)
 
     app.add_handler(CommandHandler(["start", "new", "drafts", "cancel"], command))

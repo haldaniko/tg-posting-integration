@@ -9,8 +9,7 @@ from posting_bot.publisher import FxlfmPublisher, SiteError
 
 def test_fxlfm_http_contract(tmp_path):
     external_id = str(uuid4())
-    photo = tmp_path / "photo.jpg"
-    photo.write_bytes(b"\xff\xd8\xffbinary")
+    photo = b"\xff\xd8\xffbinary"
     calls = []
 
     def handler(request):
@@ -36,7 +35,7 @@ def test_fxlfm_http_contract(tmp_path):
         assert (await pub.options()).categories[0].slug == "politics"
         assert await pub.get_article(external_id) is None
         assert (await pub.create_article(external_id, {"title": "T", "content": "C", "category_slugs": ["politics"]})).article_id == "5"
-        assert (await pub.upload_image(external_id, photo)).image_url == "https://test/i"
+        assert (await pub.upload_image(external_id, "telegram.jpg", photo)).image_url == "https://test/i"
         assert (await pub.publish_article(external_id)).status == "published"
         await client.aclose()
 

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Protocol
 
 import httpx
@@ -40,7 +39,7 @@ class SitePublisher(Protocol):
     async def options(self) -> Options: ...
     async def get_article(self, external_id: str) -> Article | None: ...
     async def create_article(self, external_id: str, payload: dict) -> Article: ...
-    async def upload_image(self, external_id: str, path: Path) -> Article: ...
+    async def upload_image(self, external_id: str, filename: str, data: bytes) -> Article: ...
     async def publish_article(self, external_id: str) -> Article: ...
     async def close(self) -> None: ...
 
@@ -104,14 +103,10 @@ class FxlfmPublisher:
         data = await self._request("POST", "articles/", json={"external_id": external_id, **payload})
         return self._article(data)
 
-    async def upload_image(self, external_id: str, path: Path) -> Article:
-        kind = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(path.suffix.lower(), "application/octet-stream")
-        try:
-            with path.open("rb") as file:
-                data = await self._request("PUT", f"articles/{external_id}/image/", files={"image": (path.name, file, kind)})
-        except FileNotFoundError as exc:
-            raise SiteError("Локальное фото утрачено. Выберите новое фото в новой версии статьи.") from exc
-        return self._article(data)
+    async def upload_image(self, external_id: str, filename: str, data: bytes) -> Article:
+        kind = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}.get(filename[filename.rfind("."):].lower(), "application/octet-stream")
+        response = await self._request("PUT", f"articles/{external_id}/image/", files={"image": (filename, data, kind)})
+        return self._article(response)
 
     async def publish_article(self, external_id: str) -> Article:
         data = await self._request("POST", f"articles/{external_id}/publish/")

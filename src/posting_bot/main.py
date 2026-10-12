@@ -28,7 +28,7 @@ def main() -> None:
             await publisher.close()
 
     app = Application.builder().token(config.telegram_token).concurrent_updates(False).post_shutdown(shutdown).build()
-    register(app, service, config.photo_dir)
+    register(app, service)
     app.run_polling(drop_pending_updates=False, allowed_updates=["message", "callback_query"])
 
 

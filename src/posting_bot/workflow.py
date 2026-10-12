@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -21,16 +21,23 @@ class View:
     buttons: tuple[tuple[tuple[str, str], ...], ...] = ()
 
 
+@dataclass(frozen=True)
+class PhotoRef:
+    file_id: str
+    suffix: str
+
+
 def row(*pairs: tuple[str, str]) -> tuple[tuple[str, str], ...]:
     return pairs
 
 
 class BotService:
-    def __init__(self, config: Config, store: Store, publishers: dict[str, SitePublisher]):
+    def __init__(self, config: Config, store: Store, publishers: dict[str, SitePublisher], photo_loader: Callable[[str], Awaitable[bytes]] | None = None):
         self.config = config
         self.store = store
         self.publishers = publishers
         self.sites = {s.id: s for s in config.sites}
+        self.photo_loader = photo_loader
 
     def allowed(self, user_id: int | None) -> bool:
         return user_id is not None and user_id in self.config.allowed_user_ids
@@ -83,7 +90,7 @@ class BotService:
     def _preview(draft: Draft) -> str:
         excerpt = draft.content[:1200] + ("…" if len(draft.content) > 1200 else "")
         return (f"Предпросмотр — {draft.site_id}\n\n{draft.title}\n\nОписание: {draft.summary or '—'}"
-                f"\n\n{excerpt}\n\nФото: {'да' if draft.photo_path else 'нет'}"
+                f"\n\n{excerpt}\n\nФото: {'да' if draft.photo_file_id else 'нет'}"
                 f"\nКатегория: {draft.category_slug or '—'}\nАвтор: {draft.author_slug or '—'}"
                 f"\nТеги: {', '.join(draft.tag_names) or '—'}")
 
@@ -117,12 +124,11 @@ class BotService:
                 return View("Кнопка устарела. Откройте /drafts.")
             if draft.state == "publishing":
                 return View("Публикация уже началась. Проверьте результат через /drafts.")
-            photo = draft.photo_path
             draft.state = "cancelled"
+            draft.photo_file_id = None
+            draft.photo_suffix = None
             draft.revision += 1
             self.store.editor(db, user_id).active_draft_id = None
-        if photo:
-            Path(photo).unlink(missing_ok=True)
         return View("Черновик отменён.")
 
     async def _snapshot(self, site_id: str) -> dict:
@@ -130,24 +136,17 @@ class BotService:
         return {"categories": [{"slug": o.slug, "name": o.name} for o in options.categories],
                 "authors": [{"slug": o.slug, "name": o.name} for o in options.authors]}
 
-    async def input(self, user_id: int, value: str | Path, *, update_id: int | None = None) -> View:
+    async def input(self, user_id: int, value: str | PhotoRef, *, update_id: int | None = None) -> View:
         if not self.allowed(user_id):
-            if isinstance(value, Path):
-                value.unlink(missing_ok=True)
             return View("Нет доступа к этому боту.")
         with self.store.session() as db, db.begin():
             if update_id is not None and not self.store.mark_update(db, update_id):
-                if isinstance(value, Path):
-                    value.unlink(missing_ok=True)
                 return View("Это сообщение уже обработано.")
             draft = self.store.active(db, user_id)
             if not draft:
-                if isinstance(value, Path):
-                    value.unlink(missing_ok=True)
                 return View("Сначала нажмите «Создать статью» или /new.")
             state = draft.state
-            if isinstance(value, Path) and state != "photo":
-                value.unlink(missing_ok=True)
+            if isinstance(value, PhotoRef) and state != "photo":
                 return View("Сейчас ожидается другой шаг. " + self._view(draft).text)
             if isinstance(value, str) and state not in {"title", "summary", "content", "tags"}:
                 return View("Сообщение сейчас не ожидается. " + self._view(draft).text, self._view(draft).buttons)
@@ -170,11 +169,9 @@ class BotService:
                     return View("Текст слишком длинный (максимум 100 000 символов).")
                 draft.content = draft.content + ("\n\n" if draft.content else "") + value
             elif state == "photo":
-                previous = draft.photo_path
-                draft.photo_path = str(value)
+                draft.photo_file_id = value.file_id
+                draft.photo_suffix = value.suffix
                 self._advance(draft, "category")
-                if previous:
-                    Path(previous).unlink(missing_ok=True)
             elif state == "tags":
                 tags = [part.strip() for part in value.split(",") if part.strip()]
                 if len(tags) > 10 or any(len(t) > 80 for t in tags):
@@ -280,9 +277,8 @@ class BotService:
                     return View("Добавьте основной текст перед продолжением.")
                 self._advance(draft, "photo")
             elif state == "photo" and action == "skip":
-                if draft.photo_path:
-                    Path(draft.photo_path).unlink(missing_ok=True)
-                draft.photo_path = None
+                draft.photo_file_id = None
+                draft.photo_suffix = None
                 self._advance(draft, "category")
             elif state in {"category", "author"} and action[:1] == ("c" if state == "category" else "a") and action[1:].isdigit():
                 key = "categories" if state == "category" else "authors"
@@ -322,7 +318,8 @@ class BotService:
             if delivery.lease_until > int(time.time()):
                 return View("Публикация уже выполняется. Подождите и проверьте /drafts.")
             delivery.lease_until = int(time.time()) + 90
-            external_id, site_id, photo = delivery.external_id, delivery.site_id, draft.photo_path
+            external_id, site_id = delivery.external_id, delivery.site_id
+            photo = (draft.photo_file_id, draft.photo_suffix) if draft.photo_file_id else None
             payload = {"title": draft.title, "content": draft.content, "summary": draft.summary,
                        "category_slugs": [draft.category_slug], "author_slug": draft.author_slug, "tag_names": list(draft.tag_names)}
         publisher = self.publishers[site_id]
@@ -341,12 +338,12 @@ class BotService:
                 draft = db.get(Draft, draft_id, with_for_update=True)
                 draft.state = "published"
                 draft.revision += 1
+                draft.photo_file_id = None
+                draft.photo_suffix = None
                 draft.deliveries[0].lease_until = 0
                 editor = self.store.editor(db, user_id)
                 if editor.active_draft_id == draft_id:
                     editor.active_draft_id = None
-            if photo:
-                Path(photo).unlink(missing_ok=True)
             return View(f"Статья опубликована: {article.url}")
         except SiteError as exc:
             log.warning("Site publish failed: site=%s draft=%s status=%s retryable=%s", site_id, draft_id, exc.status, exc.retryable)
@@ -359,18 +356,33 @@ class BotService:
                 view = self._view(draft)
             return View(str(exc) + "\n\n" + view.text, view.buttons)
 
-    async def _send_to_site(self, publisher: SitePublisher, draft_id: str, external_id: str, payload: dict, photo: str | None):
+    async def _send_to_site(self, publisher: SitePublisher, draft_id: str, external_id: str, payload: dict, photo: tuple[str, str] | None):
         article = await publisher.get_article(external_id)
         if article is None or article.status != "published":
             article = await publisher.create_article(external_id, payload)
             self._save_delivery(draft_id, article, "created")
             if photo and not article.image_url:
-                article = await publisher.upload_image(external_id, Path(photo))
+                image_bytes = await self._load_photo(photo[0], photo[1])
+                article = await publisher.upload_image(external_id, "telegram" + photo[1], image_bytes)
                 if not article.image_url:
                     raise SiteError("Сайт не подтвердил загрузку фото. Повторите действие.", retryable=True)
                 self._save_delivery(draft_id, article, "image_uploaded")
             article = await publisher.publish_article(external_id)
         return article
+
+    async def _load_photo(self, file_id: str, suffix: str) -> bytes:
+        if self.photo_loader is None:
+            raise SiteError("Загрузка фото из Telegram не настроена.")
+        try:
+            data = await self.photo_loader(file_id)
+        except Exception as exc:
+            log.warning("Telegram photo retrieval failed: %s", type(exc).__name__)
+            raise SiteError("Не удалось получить фото из Telegram. Повторите действие.", retryable=True) from exc
+        signature = data[:12]
+        valid = (suffix == ".jpg" and signature.startswith(b"\xff\xd8\xff")) or (suffix == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")) or (suffix == ".webp" and signature.startswith(b"RIFF") and signature[8:12] == b"WEBP")
+        if len(data) > 10 * 1024 * 1024 or not valid:
+            raise SiteError("Фото должно быть JPG, PNG или WebP размером до 10 МБ.")
+        return data
 
     def _save_delivery(self, draft_id: str, article, stage: str) -> None:
         with self.store.session() as db, db.begin():

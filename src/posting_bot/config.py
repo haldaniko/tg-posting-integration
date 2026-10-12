@@ -23,7 +23,6 @@ class Config:
     telegram_token: str
     allowed_user_ids: frozenset[int]
     database_url: str
-    photo_dir: Path
     sites: tuple[SiteConfig, ...]
 
 
@@ -54,5 +53,7 @@ def load_config() -> Config:
         sites.append(SiteConfig(spec["id"], spec["name"], base, secret, spec.get("adapter", "fxlfm")))
     if len({s.id for s in sites}) != len(sites):
         raise ValueError("Site IDs must be unique")
-    return Config(token, users, os.environ.get("DATABASE_URL", "sqlite:///./bot.sqlite3"), Path(os.environ.get("PHOTO_DIR", "./photo_cache")), tuple(sites))
+    project_root = Path(__file__).resolve().parents[2]
+    default_db = f"sqlite:///{(project_root / 'bot.sqlite3').as_posix()}"
+    return Config(token, users, os.environ.get("DATABASE_URL", default_db), tuple(sites))
 
