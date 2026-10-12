@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, create_engine, select
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, JSON, String, Text, UniqueConstraint, create_engine, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, relationship, sessionmaker
 
 
@@ -17,14 +17,14 @@ class Base(DeclarativeBase):
 
 class Editor(Base):
     __tablename__ = "editors"
-    user_id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     active_draft_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
 
 class Draft(Base):
     __tablename__ = "drafts"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
-    user_id: Mapped[int] = mapped_column(index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
     site_id: Mapped[str | None] = mapped_column(String(64))
     state: Mapped[str] = mapped_column(String(32), default="site")
     revision: Mapped[int] = mapped_column(Integer, default=0)
@@ -61,7 +61,7 @@ class Delivery(Base):
 
 class ProcessedUpdate(Base):
     __tablename__ = "processed_updates"
-    update_id: Mapped[int] = mapped_column(primary_key=True)
+    update_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -69,7 +69,32 @@ class Store:
     def __init__(self, url: str):
         self.engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite:") else {}, pool_pre_ping=True)
         Base.metadata.create_all(self.engine)
+        self._upgrade_postgres_integer_ids()
         self.sessions = sessionmaker(self.engine, expire_on_commit=False)
+
+    def _upgrade_postgres_integer_ids(self) -> None:
+        if self.engine.dialect.name != "postgresql":
+            return
+
+        # create_all() leaves existing columns untouched. Earlier releases used
+        # PostgreSQL INTEGER for Telegram IDs, which can exceed 32 bits.
+        columns = (("editors", "user_id"), ("drafts", "user_id"), ("processed_updates", "update_id"))
+        with self.engine.begin() as connection:
+            for table_name, column_name in columns:
+                data_type = connection.execute(
+                    text(
+                        "SELECT data_type FROM information_schema.columns "
+                        "WHERE table_schema = current_schema() "
+                        "AND table_name = :table_name AND column_name = :column_name"
+                    ),
+                    {"table_name": table_name, "column_name": column_name},
+                ).scalar_one_or_none()
+                if data_type == "integer":
+                    connection.exec_driver_sql(
+                        f'ALTER TABLE "{table_name}" ALTER COLUMN "{column_name}" TYPE BIGINT'
+                    )
+                elif data_type != "bigint":
+                    raise RuntimeError(f"Unexpected type for {table_name}.{column_name}: {data_type}")
 
     def session(self) -> Session:
         return self.sessions()
