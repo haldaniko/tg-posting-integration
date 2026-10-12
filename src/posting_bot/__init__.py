@@ -1,0 +1,1 @@
+"""Editorial Telegram publisher."""
