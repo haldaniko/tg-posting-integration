@@ -38,3 +38,9 @@ services:
 
 volumes:
   postgres_data:
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${BOT_DOCKER_SUBNET:-10.243.227.0/24}
