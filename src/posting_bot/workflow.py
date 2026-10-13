@@ -103,7 +103,7 @@ class BotService:
                 return self._view(current)
             if fresh:
                 return self._view(self.store.new(db, user_id))
-            return View("Выберите действие: /new — создать статью, /drafts — черновики, /cancel — отменить.")
+            return View("Выберите действие:\n/new — создать статью\n/drafts — черновики\n/cancel — отменить.")
 
     def drafts(self, user_id: int) -> View:
         if not self.allowed(user_id):
